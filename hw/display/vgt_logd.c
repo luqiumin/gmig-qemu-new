@@ -134,6 +134,15 @@ void logd_hash_a_page(vgt_logd_t *logd, void *va, unsigned long gfn) {
     set_bit(TAG_OFFSET(gfn), slot->logd_dirty_bitmap);
 
     logd_tag_t *tag = slot->logd_tag_block->block + TAG_OFFSET(gfn);
+
+#ifdef MIGRATION_SAMPLING
+    int i=0;
+    for(i=0;i!=LOGD_SAMPLE_SIZE;++i)
+    {
+        tag->data_sample[i]= * ( ( (uint8_t *) va ) + ( i*LOGD_SAMPLE_INTERVAL ) );
+    }
+#endif
+
     hash_of_page_256bit(va, tag);
 }
 
@@ -153,6 +162,20 @@ bool logd_page_rehash_and_test(vgt_logd_t *logd, void *va, unsigned long gfn) {
     if (test_bit(TAG_OFFSET(gfn), slot->logd_dirty_bitmap)==0) return true;
 
     logd_tag_t *tag = slot->logd_tag_block->block + TAG_OFFSET(gfn);
+
+
+#ifdef MIGRATION_SAMPLING
+    int i=0;
+     uint8_t test;
+    for(i=0;i!=LOGD_SAMPLE_SIZE;++i)
+    {
+        test = * ( ( (uint8_t *) va ) + ( i*LOGD_SAMPLE_INTERVAL ) ) ;
+        if( ( tag->data_sample[i] ) != test )
+        {
+            return true;
+        }
+    }
+#endif
 
     bool is_modified = hash_of_page_256bit(va, tag);
 
