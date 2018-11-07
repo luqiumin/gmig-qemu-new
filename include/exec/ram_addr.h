@@ -134,7 +134,7 @@ static inline void gpu_physical_memory_set_dirty_range(ram_addr_t start,
 
     end = TARGET_PAGE_ALIGN(start + length) >> TARGET_PAGE_BITS;
     page = start >> TARGET_PAGE_BITS;
-    bitmap_set(ram_list.dirty_memory[DIRTY_MEMORY_VGPU], page, end - page);
+    bitmap_set(ram_list.dirty_memory[DIRTY_MEMORY_VGPU1], page, end - page);
     xen_modified_memory(start, length);
 }
 
@@ -201,6 +201,16 @@ static inline void gpu_physical_memory_set_dirty_lebitmap(unsigned long *bitmap,
     unsigned long len = (pages + HOST_LONG_BITS - 1) / HOST_LONG_BITS;
     unsigned long hpratio = getpagesize() / TARGET_PAGE_SIZE;
     unsigned long page = BIT_WORD(start >> TARGET_PAGE_BITS);
+    unsigned long end_page = BIT_WORD((start >> TARGET_PAGE_BITS) + pages - 1 );
+    long tmp;
+    for (tmp = page; tmp < end_page; tmp++) {
+            if (bitmap[tmp]) {
+
+                ram_list.dirty_memory[DIRTY_MEMORY_VGPU4][tmp] = ram_list.dirty_memory[DIRTY_MEMORY_VGPU3][tmp];
+                ram_list.dirty_memory[DIRTY_MEMORY_VGPU3][tmp] = ram_list.dirty_memory[DIRTY_MEMORY_VGPU2][tmp];
+                ram_list.dirty_memory[DIRTY_MEMORY_VGPU2][tmp] = ram_list.dirty_memory[DIRTY_MEMORY_VGPU1][tmp];
+            }
+    }
 
     /* start address is aligned at the start of a word? */
     if ((((page * BITS_PER_LONG) << TARGET_PAGE_BITS) == start) &&
@@ -212,7 +222,7 @@ static inline void gpu_physical_memory_set_dirty_lebitmap(unsigned long *bitmap,
             if (bitmap[k]) {
                 unsigned long temp = leul_to_cpu(bitmap[k]);
 
-                ram_list.dirty_memory[DIRTY_MEMORY_VGPU][page + k] |= temp;
+                ram_list.dirty_memory[DIRTY_MEMORY_VGPU1][page + k] |= temp;
             }
         }
         xen_modified_memory(start, pages);

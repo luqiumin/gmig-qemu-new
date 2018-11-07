@@ -602,7 +602,7 @@ static void vgpu_bitmap_sync_range(ram_addr_t start, ram_addr_t length)
     if (((page * BITS_PER_LONG) << TARGET_PAGE_BITS) == start) {
         int k;
         int nr = BITS_TO_LONGS(length >> TARGET_PAGE_BITS);
-        unsigned long *src = ram_list.dirty_memory[DIRTY_MEMORY_VGPU];
+        unsigned long *src = ram_list.dirty_memory[DIRTY_MEMORY_VGPU1];
 
         for (k = page; k < page + nr; k++) {
             if (src[k]) {
@@ -619,7 +619,7 @@ static void vgpu_bitmap_sync_range(ram_addr_t start, ram_addr_t length)
         for (addr = 0; addr < length; addr += TARGET_PAGE_SIZE) {
             if (cpu_physical_memory_get_dirty(start + addr,
                                               TARGET_PAGE_SIZE,
-                                              DIRTY_MEMORY_VGPU)) {
+                                              DIRTY_MEMORY_VGPU1)) {
                 // cpu_physical_memory_reset_dirty(start + addr,
                 //                                TARGET_PAGE_SIZE,
                 //                                DIRTY_MEMORY_VGPU);
