@@ -951,7 +951,39 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     return pages;
 }
 
+static int gm_save_page_end(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
+                         bool is_dirty, uint64_t *bytes_transferred)
+{
+    int pages = 0;
+    ram_addr_t current_addr;
+    MemoryRegion *mr = block->mr;
+    uint8_t *p;
 
+    p = memory_region_get_ram_ptr(mr) + offset;
+    current_addr = block->offset + offset;
+
+
+        if (!is_dirty) {
+            skip_by_hashing++;
+            return 0;
+        }
+        
+
+    if (block == last_sent_block) {
+        offset |= RAM_SAVE_FLAG_CONTINUE;
+    }
+
+    *bytes_transferred += save_page_header(f, block,
+                                   offset | RAM_SAVE_FLAG_PAGE);
+    qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
+    *bytes_transferred += TARGET_PAGE_SIZE;
+    pages = 1;
+    acct_info.norm_pages++;
+
+//    printf("gm_save_page: initial: %d, final: %d, modified: %d\n", initial_cnt, final_cnt, final_mod_cnt);
+
+    return pages;
+}
 /**
  * ram_find_and_save_block: Finds a dirty page and sends it to f
  *
@@ -1040,6 +1072,184 @@ static int ram_gm_find_and_save_block(QEMUFile *f, bool last_stage,
 
     return pages;
 }
+
+#define SYNC_QUEUE_LENGTH	1024
+static ram_addr_t offset_rec[SYNC_QUEUE_LENGTH];
+static ram_addr_t addr_rec[SYNC_QUEUE_LENGTH];
+static uint8_t p_rec[SYNC_QUEUE_LENGTH];
+static int ret_rec[SYNC_QUEUE_LENGTH];
+static int head=0;
+static int tail=0;
+static int curr=0;
+
+
+static int ram_gm_find_and_save_block_end(QEMUFile *f, bool last_stage,
+                                   uint64_t *bytes_transferred)
+{
+    RAMBlock *block = last_seen_block;
+    ram_addr_t ram_offset = last_offset;
+    ram_addr_t gm_offset = last_gm_offset;
+    ram_addr_t gm_offset_curr;
+    bool complete_round = false;
+    int pages = 0, gm_pages = 0, ram_pages = 0;
+    MemoryRegion *mr;
+    bool need_waiting=false;
+
+    if (!block)
+        block = QLIST_FIRST_RCU(&ram_list.blocks);
+
+    while (true) {
+        mr = block->mr;
+        if (ram_offset < block->used_length)
+            ram_offset = migration_bitmap_find_and_reset_dirty(mr, ram_offset);
+        if (gm_offset < block->used_length)
+            gm_offset = vgpu_bitmap_find_and_reset_dirty(mr, gm_offset);
+
+        if (complete_round && block == last_seen_block &&
+            ram_offset >= last_offset && gm_offset >= last_gm_offset) {
+            break;
+        }
+        if (ram_offset >= block->used_length && gm_offset >= block->used_length && head == tail/*queue is empty*/) {
+            //printf("ram_offset: %lu, gm_offset: %lu, max_offset: %lu\n", ram_offset, gm_offset, block->used_length);
+            ram_offset = 0;
+            gm_offset = 0;
+            block = QLIST_NEXT_RCU(block, next);
+            if (!block) {
+                if (ram_bulk_stage) {
+                    trace_exit_bulk_stage(get_mig_time());
+                }
+
+                block = QLIST_FIRST_RCU(&ram_list.blocks);
+                complete_round = true;
+                ram_bulk_stage = false;
+
+                trace_round_pages(round_count, curr_round_sent_cpu, curr_round_sent_gpu);
+                round_count++;
+                trace_enter_round(round_count);
+                curr_round_sent_cpu = 0;
+                curr_round_sent_gpu = 0;
+            }
+        } else {
+            need_waiting=false;
+            if (gm_offset < block->used_length)
+            {
+                if(tail == (head + 1) % SYNC_QUEUE_LENGTH)
+                    need_waiting=true;
+                else
+                {
+                    head = (head + 1) % SYNC_QUEUE_LENGTH;
+                    offset_rec[head] = gm_offset;
+                    addr_rec[head] = block->offset + gm_offset;
+                    p_rec[head] = memory_region_get_ram_ptr(mr) + gm_offset;
+                    ret_rec[head] = -1;
+                }
+            }
+            /*
+            need_waiting=false;
+            if (gm_offset < block->used_length)
+            {
+                if(queue is full)
+                    need_waiting=true;
+                else
+                    push gm_offset into queue;
+            }
+            else
+            {
+                end_block=true;
+            }
+            */
+            if (ram_offset < block->used_length)
+                ram_pages = ram_save_page(f, block, ram_offset, last_stage,
+                                  bytes_transferred);
+            // if (gm_offset < block->used_length)
+            //     gm_pages = gm_save_page(f, block, gm_offset, last_stage,
+            //                       bytes_transferred);
+            if (need_waiting)
+            {
+                while(tail == (head + 1) % SYNC_QUEUE_LENGTH)
+                    ;
+                head = (head + 1) % SYNC_QUEUE_LENGTH;
+                offset_rec[head] = gm_offset;
+                addr_rec[head] = block->offset + gm_offset;
+                p_rec[head] = memory_region_get_ram_ptr(mr) + gm_offset;
+                ret_rec[head] = -1;
+            }
+            if (head!=tail&&ret_rec[(tail + 1) % SYNC_QUEUE_LENGTH]>=0)
+            {
+                tail = (tail + 1) % SYNC_QUEUE_LENGTH;
+                gm_offset_curr = offset_rec[tail];
+                gm_pages = gm_save_page_end(f, block, gm_offset_curr, ret_rec[tail],
+                    bytes_transferred);
+
+            }
+            /*
+            if (need_waiting)
+            {
+                waiting for queue is not full;
+                push gm_offset into queue;
+            }
+            if (queue tail is processed)
+            {
+                gm_offset_curr = queue tail pop;
+                gm_pages = gm_save_page(f, block, gm_offset_curr, last_stage,
+                    bytes_transferred);
+
+            }
+
+
+            */
+
+
+
+            pages += (gm_pages + ram_pages);
+            curr_round_sent_cpu += ram_pages;
+            curr_round_sent_gpu += gm_pages;
+
+            if (is_complete_stage) {
+                complete_stage_sent_cpu += ram_pages;
+                complete_stage_sent_gpu += gm_pages;
+            }
+
+            /* if page is unmodified, continue to the next */
+            if (pages > 0) {
+                last_sent_block = block;
+                break;
+            }
+        }
+    }
+
+    last_seen_block = block;
+    last_offset = ram_offset;
+    last_gm_offset = gm_offset;
+
+
+    return pages;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #endif
 
 #if 1
