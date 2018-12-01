@@ -377,6 +377,29 @@ static size_t save_page_header(QEMUFile *f, RAMBlock *block, ram_addr_t offset)
     return size;
 }
 
+
+// static size_t save_page_header_1(QEMUFile *f, char *idstr, ram_addr_t offset)
+// {
+//     size_t size;
+
+//     // printf("save_page_header1\n");
+//     qemu_put_be64(f, offset);
+//     // printf("save_page_header2\n");
+//     size = 8;
+
+//     if (!(offset & RAM_SAVE_FLAG_CONTINUE)) {
+//     // printf("save_page_header3\n");
+//         qemu_put_byte(f, strlen(idstr));
+//     // printf("save_page_header4\n");
+//         qemu_put_buffer(f, (uint8_t *)idstr,
+//                         strlen(idstr));
+//     // printf("save_page_header5\n");
+//         size += 1 + strlen(idstr);
+//     // printf("save_page_header6\n");
+//     }
+//     return size;
+// }
+
 /* Update the xbzrle cache to reflect a page that's been sent as all 0.
  * The important thing is that a stale (not-yet-0'd) page be replaced
  * by the new data.
@@ -900,17 +923,18 @@ static int ram_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
 static uint8_t pp[TARGET_PAGE_SIZE*SHARE_QUEUE_LENGTH];
 static uint8_t *ptr_rec[SHARE_QUEUE_LENGTH];
 static unsigned long addr_l[SHARE_QUEUE_LENGTH];
-static RAMBlock* block_rec[SHARE_QUEUE_LENGTH];
+static int dirty_rec[SHARE_QUEUE_LENGTH];
 static ram_addr_t offset_rec[SHARE_QUEUE_LENGTH];
 static int head=0;
 static int tail=0;
+static int curr=0;
 static bool first_enable=1;
 static bool second_enable=1;
 static pthread_t first_thread;
 static pthread_t second_thread;
 pthread_mutex_t mutex_enable,mutex_queue;
 pthread_cond_t cond_queue;
-static QEMUFile *f_stat;
+// static QEMUFile *f_stat;
 
 
 static void * first_thread_func(void * in)
@@ -925,7 +949,19 @@ static void * first_thread_func(void * in)
         pthread_mutex_unlock(&mutex_enable);
         if(!tmp)
         {
-            break;
+            if(tail==head)
+            {
+                break;
+            }
+            else
+            {
+                while (tail!=head)
+                {
+                    tail=(tail+1)%SHARE_QUEUE_LENGTH;
+                    vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);
+                }
+                break;
+            }
         }
         while(1)
         {
@@ -962,6 +998,12 @@ static void * first_thread_func(void * in)
 static void * second_thread_func(void * in)
 {
     bool tmp;
+    bool ret;
+    unsigned long current_page_addr;
+    uint8_t *p;
+    int tmp_pos;
+    bool need_sig;
+    printf("Thread start\n");
     while(1)
     {
         tmp=1;
@@ -971,37 +1013,44 @@ static void * second_thread_func(void * in)
         pthread_mutex_unlock(&mutex_enable);
         if(!tmp)
         {
-            break;
-        }
-        while(1)
-        {
-            pthread_mutex_lock(&mutex_queue);
-            if(tail==head)
-            {
-                pthread_cond_wait(&cond_queue, &mutex_queue);
-                pthread_mutex_unlock(&mutex_queue);
                 break;
-            }
-            if(tail==(head+1)%SHARE_QUEUE_LENGTH)
-            {
-                tail=(tail+1)%SHARE_QUEUE_LENGTH;
-                save_page_header(f_stat, block_rec[tail],offset_rec[tail] | RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer(f_stat, ptr_rec[tail], TARGET_PAGE_SIZE);
-
-                pthread_cond_signal(&cond_queue);
-                pthread_mutex_unlock(&mutex_queue);
-            }
-            else
-            {
-                tail=(tail+1)%SHARE_QUEUE_LENGTH;
-                pthread_mutex_unlock(&mutex_queue);
-                
-                save_page_header(f_stat, block_rec[tail],offset_rec[tail] | RAM_SAVE_FLAG_PAGE);
-                qemu_put_buffer(f_stat, ptr_rec[tail], TARGET_PAGE_SIZE);
-            }
-            
-            hash_gpu_pages_count++;
         }
+        pthread_mutex_lock(&mutex_queue);
+        if(curr==head)
+        {
+            printf("Wait for empty\n");
+            pthread_cond_wait(&cond_queue, &mutex_queue);
+            pthread_mutex_unlock(&mutex_queue);
+            continue;
+        }
+        else
+        {
+            pthread_mutex_unlock(&mutex_queue);
+        }
+        tmp_pos = (curr+1)%SHARE_QUEUE_LENGTH;
+        current_page_addr = addr_l[tmp_pos];
+        p = ptr_rec[tmp_pos];
+        ret=vgt_page_is_modified(p, current_page_addr);
+        if(ret)
+            printf("processed one dirty page\n");
+        hash_gpu_pages_count++;
+        dirty_rec[tmp_pos] = ret;
+        need_sig = false;
+        // printf("processed one page1\n");
+
+        pthread_mutex_lock(&mutex_queue);
+        // printf("processed one page2\n");
+        if(tail == (head + 1) % SHARE_QUEUE_LENGTH && curr==tail)
+            need_sig = true;
+        // printf("processed one page3\n");
+        curr = tmp_pos;
+
+        // printf("curr:%d;head:%d;tail:%d\n",curr,head,tail);
+        if(need_sig)
+            pthread_cond_signal(&cond_queue);
+        pthread_mutex_unlock(&mutex_queue);
+
+
     }
 
     return (void*) 0;
@@ -1069,69 +1118,58 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
         //printf("gm_save_page, not bulk or last!!!\n");
         return 0;
     }
-    else {
+    return 0;
+    
+}
+
+static int gm_save_page_end(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
+                         bool is_dirty, uint64_t *bytes_transferred)
+{
+    int pages = 0;
+    // ram_addr_t current_addr;
+    MemoryRegion *mr = block->mr;
+    uint8_t *p;
+    // int tmp;
+
+
         /* if it's the last stage, we calculate the hash value, if it is
          * not dirty, we skip it
          */
         p = memory_region_get_ram_ptr(mr) + offset;
-        current_addr = block->offset + offset;
+        // current_addr = block->offset + offset;
 
 
-        head= (head+1)%SHARE_QUEUE_LENGTH;
+        // head= (head+1)%SHARE_QUEUE_LENGTH;
 
 
+                // printf("Main iterate\n");
 
-        hash_gpu_pages_count++;
-        if (!vgt_page_is_modified(p, current_addr >> TARGET_PAGE_BITS)) {
+        // hash_gpu_pages_count++;
+        if (!is_dirty) {
             skip_by_hashing++;
             return 0;
         }
 
 
         if (block == last_sent_block) {
-        offset |= RAM_SAVE_FLAG_CONTINUE;
+            offset |= RAM_SAVE_FLAG_CONTINUE;
         }
-        if (!((offset | RAM_SAVE_FLAG_PAGE) & RAM_SAVE_FLAG_CONTINUE)) {
-            *bytes_transferred += 1 + strlen(block->idstr);
-        }
-
-
-        pthread_mutex_lock(&mutex_queue);
-        tmp=head;
-
-        if (tail==(head+1)%SHARE_QUEUE_LENGTH)
-        {
-            pthread_cond_wait(&cond_queue, &mutex_queue);
-        }
-
-        head = (head+1)%SHARE_QUEUE_LENGTH;
-        ptr_rec[head] = p;
-        block_rec[head] = block;
-        offset_rec[head] = offset;
-
-        if(tail==tmp)
-        {
-            pthread_cond_signal(&cond_queue);
-        }
-        pthread_mutex_unlock(&mutex_queue);
-
-        // save_page_header(f, block,offset | RAM_SAVE_FLAG_PAGE);
-        // qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
+       
+        *bytes_transferred += save_page_header(f, block,offset | RAM_SAVE_FLAG_PAGE);
+        qemu_put_buffer(f, p, TARGET_PAGE_SIZE);
 
 
 
-        *bytes_transferred += 8+ TARGET_PAGE_SIZE;
+        *bytes_transferred += TARGET_PAGE_SIZE;
         pages = 1;
         acct_info.norm_pages++;
 
         //    printf("gm_save_page: initial: %d, final: %d, modified: %d\n", initial_cnt, final_cnt, final_mod_cnt);
 
         return pages;
-    }
 
     
 }
-
 
 /**
  * ram_find_and_save_block: Finds a dirty page and sends it to f
@@ -1221,6 +1259,189 @@ static int ram_gm_find_and_save_block(QEMUFile *f, bool last_stage,
 
     return pages;
 }
+
+static int ram_gm_find_and_save_block_end(QEMUFile *f, bool last_stage,
+                                   uint64_t *bytes_transferred)
+{
+    RAMBlock *block = last_seen_block;
+    ram_addr_t ram_offset = last_offset;
+    ram_addr_t gm_offset = last_gm_offset;
+    ram_addr_t gm_offset_curr;
+    bool is_dirty_curr=false;
+    bool complete_round = false;
+    int pages = 0, gm_pages = 0, ram_pages = 0;
+    MemoryRegion *mr;
+    bool need_waiting=false;
+    bool need_send=false;
+    bool need_wake=false;
+    int tmp_pos = 0;
+
+    if (!block)
+        block = QLIST_FIRST_RCU(&ram_list.blocks);
+
+    while (true) {
+        mr = block->mr;
+        if (ram_offset < block->used_length)
+            ram_offset = migration_bitmap_find_and_reset_dirty(mr, ram_offset);
+        if (gm_offset < block->used_length)
+            gm_offset = vgpu_bitmap_find_and_reset_dirty(mr, gm_offset);
+
+        if (complete_round && block == last_seen_block &&
+            ram_offset >= last_offset && gm_offset >= last_gm_offset) {
+            break;
+        }
+        if (ram_offset >= block->used_length && gm_offset >= block->used_length && head == tail) {
+            //printf("ram_offset: %lu, gm_offset: %lu, max_offset: %lu\n", ram_offset, gm_offset, block->used_length);
+            ram_offset = 0;
+            gm_offset = 0;
+            block = QLIST_NEXT_RCU(block, next);
+            if (!block) {
+                if (ram_bulk_stage) {
+                    trace_exit_bulk_stage(get_mig_time());
+                }
+
+                block = QLIST_FIRST_RCU(&ram_list.blocks);
+                complete_round = true;
+                ram_bulk_stage = false;
+
+                trace_round_pages(round_count, curr_round_sent_cpu, curr_round_sent_gpu);
+                round_count++;
+                trace_enter_round(round_count);
+                curr_round_sent_cpu = 0;
+                curr_round_sent_gpu = 0;
+            }
+        } else {
+
+            need_waiting=false;
+            need_send=false;
+            need_wake=false;
+
+            // printf("Find start\n");
+            if (head!=tail && curr!=tail)
+            {
+                tmp_pos = (tail + 1) % SHARE_QUEUE_LENGTH;
+                gm_offset_curr = offset_rec[tmp_pos];
+                is_dirty_curr = dirty_rec[tmp_pos];
+                need_send = true;
+                pthread_mutex_lock(&mutex_queue);
+                tail = tmp_pos;
+                pthread_mutex_unlock(&mutex_queue);
+                // printf("Get a finished page\n");
+            }
+            if (gm_offset < block->used_length)
+            {
+                if(tail == (head + 1) % SHARE_QUEUE_LENGTH && curr==tail)
+                    need_waiting=true;
+                else
+                {
+                    if(tail == (head + 1) % SHARE_QUEUE_LENGTH)
+                    {
+                        tmp_pos = (tail + 1) % SHARE_QUEUE_LENGTH;
+                        gm_offset_curr = offset_rec[tmp_pos];
+                        is_dirty_curr = dirty_rec[tmp_pos];
+                        pthread_mutex_lock(&mutex_queue);
+                        tail = tmp_pos;
+                        pthread_mutex_unlock(&mutex_queue);
+                        printf("Get a finished page in full queue\n");
+                        need_send = true;
+                    }
+                    tmp_pos = (head + 1) % SHARE_QUEUE_LENGTH;
+                    offset_rec[tmp_pos] = gm_offset;
+                    addr_l[tmp_pos] = (block->offset + gm_offset) >> TARGET_PAGE_BITS;
+                    ptr_rec[tmp_pos] = memory_region_get_ram_ptr(mr) + gm_offset;
+                    dirty_rec[tmp_pos] = -1;
+                    // printf("pend a page\n");
+                    pthread_mutex_lock(&mutex_queue);
+                    need_wake=false;
+                    if(head==curr)
+                        need_wake=true;
+                    head = tmp_pos;
+                    if(need_wake)
+                        pthread_cond_signal(&cond_queue);
+                    pthread_mutex_unlock(&mutex_queue);
+                
+                }
+            }
+
+            if (ram_offset < block->used_length)
+                ram_pages = ram_save_page(f, block, ram_offset, last_stage,
+                                  bytes_transferred);
+
+                                  
+            if (need_waiting)
+            {
+                pthread_mutex_lock(&mutex_queue);
+                while(curr==tail)
+                {
+                    printf("Waiting for a finished page\n");
+                    pthread_cond_wait(&cond_queue,&mutex_queue);
+                }
+                pthread_mutex_unlock(&mutex_queue);
+
+                
+                printf("Waiting finished\n");
+                tmp_pos = (tail + 1) % SHARE_QUEUE_LENGTH;
+                gm_offset_curr = offset_rec[tmp_pos];
+                is_dirty_curr = dirty_rec[tmp_pos];
+                pthread_mutex_lock(&mutex_queue);
+                tail = tmp_pos;
+                pthread_mutex_unlock(&mutex_queue);
+                need_send = true;
+                // printf("Get a finished page\n");
+
+                tmp_pos = (head + 1) % SHARE_QUEUE_LENGTH;
+                offset_rec[tmp_pos] = gm_offset;
+                addr_l[tmp_pos] = (block->offset + gm_offset) >> TARGET_PAGE_BITS;
+                ptr_rec[tmp_pos] = memory_region_get_ram_ptr(mr) + gm_offset;
+                dirty_rec[tmp_pos] = -1;
+                pthread_mutex_lock(&mutex_queue);
+                need_wake=false;
+                if(head==curr)
+                    need_wake=true;
+                head = tmp_pos;
+                if(need_wake)
+                    pthread_cond_signal(&cond_queue);
+                pthread_mutex_unlock(&mutex_queue);
+                    // printf("pend a page\n");
+
+
+            }
+            if (need_send)
+            {
+                gm_pages = gm_save_page_end(f, block, gm_offset_curr, is_dirty_curr,
+                    bytes_transferred);
+                if(is_dirty_curr)
+                    printf("Sended a page\n");
+            }
+
+
+            pages += (gm_pages + ram_pages);
+            curr_round_sent_cpu += ram_pages;
+            curr_round_sent_gpu += gm_pages;
+
+            if (is_complete_stage) {
+                complete_stage_sent_cpu += ram_pages;
+                complete_stage_sent_gpu += gm_pages;
+            }
+
+            /* if page is unmodified, continue to the next */
+            if (pages > 0) {
+                last_sent_block = block;
+                break;
+            }
+        }
+    }
+
+    last_seen_block = block;
+    last_offset = ram_offset;
+    last_gm_offset = gm_offset;
+
+
+    return pages;
+}
+
+
+
 #endif
 
 #if 1
@@ -1554,7 +1775,25 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 /* Called with iothread lock */
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
+    printf("ram save Complete start\n");
     int total_pages = 0;
+
+
+    pthread_mutex_lock(&mutex_enable);
+    first_enable = 0;
+    second_enable = 1;
+    pthread_mutex_unlock(&mutex_enable);
+
+    pthread_mutex_lock(&mutex_queue);
+    pthread_cond_signal(&cond_queue);
+    pthread_mutex_unlock(&mutex_queue);
+    pthread_join(first_thread,NULL);
+    head=0;
+    tail=0;
+    curr=0;
+    // f_stat=f;
+    pthread_create(&second_thread,NULL,second_thread_func,NULL);
+
     rcu_read_lock();
 
     //printf("enter ram_save_complete, bulk: %d\n", ram_bulk_stage);
@@ -1572,19 +1811,6 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     ram_control_before_iterate(f, RAM_CONTROL_FINISH);
 
 
-    pthread_mutex_lock(&mutex_enable);
-    first_enable = 0;
-    second_enable = 1;
-    pthread_mutex_unlock(&mutex_enable);
-
-    pthread_mutex_lock(&mutex_queue);
-    pthread_cond_signal(&cond_queue);
-    pthread_mutex_unlock(&mutex_queue);
-    pthread_join(first_thread,NULL);
-    head=0;
-    tail=0;
-    f_stat=f;
-    pthread_create(&second_thread,NULL,second_thread_func,NULL);
 
     /* try transferring iterative blocks of memory */
 
@@ -1592,14 +1818,14 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     while (true) {
         int pages;
 
-        pages = ram_gm_find_and_save_block(f, true, &bytes_transferred);
+        pages = ram_gm_find_and_save_block_end(f, true, &bytes_transferred);
         total_pages += pages;
         /* no more blocks to sent */
         if (pages == 0) {
             break;
         }
     }
-
+    printf("ram save Complete\n");
     pthread_mutex_lock(&mutex_enable);
     second_enable = 0;
     pthread_mutex_unlock(&mutex_enable);
