@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 #ifndef _WIN32
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -54,7 +55,6 @@
 #include "qemu/host-utils.h"
 #include "qemu/rcu_queue.h"
 #include "hw/display/vgt_logd.h"
-#include <time.h>
 
 //#define DEBUG_ARCH_INIT
 #ifdef DEBUG_ARCH_INIT
@@ -941,10 +941,8 @@ static FILE *f_stat_main;
 
 static void * first_thread_func(void * in)
 {
-    timespec ts;
-    // clock_gettime(CLOCK_REALTIME, &ts);
-   long timestamp_start = 0;
-   long timestamp_duration = 0;
+    struct timespec ts_start;
+    struct timespec ts_end;
     // = ts.tv_sec*1000000 + ts.tv_nsec/1000;
     bool tmp;
     fprintf(f_stat_thread,"FIRST STAGE----------------\n");
@@ -964,14 +962,15 @@ static void * first_thread_func(void * in)
             else
             {
                 while (tail!=head)
-                {
-                    clock_gettime(CLOCK_REALTIME, &ts);
-                    timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+                {   
+                    clock_gettime(CLOCK_REALTIME, &ts_start);
+                    // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
                     tail=(tail+1)%SHARE_QUEUE_LENGTH;
-                    vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);
-                    clock_gettime(CLOCK_REALTIME, &ts);
-                    timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
-                    fprintf(f_stat_thread,"%ld,%ld;\n",timestamp_start,timestamp_duration);
+                    vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);   
+                    clock_gettime(CLOCK_REALTIME, &ts_end);
+                    // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+                    fprintf(f_stat_thread,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+                        (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
                 }
                 break;
             }
@@ -987,27 +986,29 @@ static void * first_thread_func(void * in)
             }
             if(tail==(head+1)%SHARE_QUEUE_LENGTH)
             {
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+                    clock_gettime(CLOCK_REALTIME, &ts_start);
+                // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
                 tail=(tail+1)%SHARE_QUEUE_LENGTH;
-                vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+                vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);   
+                    clock_gettime(CLOCK_REALTIME, &ts_end);
+                // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
                 pthread_cond_signal(&cond_queue);
                 pthread_mutex_unlock(&mutex_queue);
-                fprintf(f_stat_thread,"%ld,%ld;\n",timestamp_start,timestamp_duration);
+                fprintf(f_stat_thread,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+                    (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
             }
             else
             {
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+                    clock_gettime(CLOCK_REALTIME, &ts_start);
+                // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
                 tail=(tail+1)%SHARE_QUEUE_LENGTH;
                 pthread_mutex_unlock(&mutex_queue);
                 
-                vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
-                fprintf(f_stat_thread,"%ld,%ld;\n",timestamp_start,timestamp_duration);
+                vgt_hash_a_page(ptr_rec[tail], addr_l[tail]);   
+                    clock_gettime(CLOCK_REALTIME, &ts_end);
+                // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+                fprintf(f_stat_thread,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+                    (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
             }
             
             hash_gpu_pages_count++;
@@ -1016,11 +1017,6 @@ static void * first_thread_func(void * in)
 
     return (void*) 0;
 }
-
-
-//    timespec ts;
-//    clock_gettime(CLOCK_REALTIME, &ts);
-//    long timestamp = ts.tv_sec*1000000 + ts.tv_nsec/1000;
 
 
 
@@ -1033,10 +1029,9 @@ static void * second_thread_func(void * in)
     uint8_t *p;
     int tmp_pos;
     bool need_sig;
-    timespec ts;
     // clock_gettime(CLOCK_REALTIME, &ts);
-   long timestamp_start = 0;
-   long timestamp_duration = 0;
+    struct timespec ts_start;
+    struct timespec ts_end;
     fprintf(f_stat_thread,"SECOND STAGE----------------\n");
     while(1)
     {
@@ -1061,8 +1056,10 @@ static void * second_thread_func(void * in)
         {
             pthread_mutex_unlock(&mutex_queue);
         }
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+   
+        clock_gettime(CLOCK_REALTIME, &ts_start);
+        // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+
         tmp_pos = (curr+1)%SHARE_QUEUE_LENGTH;
         current_page_addr = addr_l[tmp_pos];
         p = ptr_rec[tmp_pos];
@@ -1072,9 +1069,11 @@ static void * second_thread_func(void * in)
         hash_gpu_pages_count++;
         dirty_rec[tmp_pos] = ret;
         need_sig = false;
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
-        fprintf(f_stat_thread,"%ld,%ld,%d;\n",timestamp_start,timestamp_duration,ret);
+   
+        clock_gettime(CLOCK_REALTIME, &ts_end);
+        // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+        fprintf(f_stat_thread,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+            (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
         // printf("processed one page1\n");
 
         pthread_mutex_lock(&mutex_queue);
@@ -1106,8 +1105,8 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     MemoryRegion *mr = block->mr;
     uint8_t *p;
     int tmp;
-   long timestamp_start = 0;
-   long timestamp_duration = 0;
+    struct timespec ts_start;
+    struct timespec ts_end;
 
 
     if (!last_stage && ram_bulk_stage) {
@@ -1116,8 +1115,9 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
          */
 
                 
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+        clock_gettime(CLOCK_REALTIME, &ts_start);
+        // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+
         p = memory_region_get_ram_ptr(mr) + offset;
         current_addr = block->offset + offset;
 
@@ -1154,9 +1154,11 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
         pages = 1;
         acct_info.norm_pages++;
 
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
-                fprintf(f_stat_main,"%ld,%ld;\n",timestamp_start,timestamp_duration);
+        clock_gettime(CLOCK_REALTIME, &ts_end);
+        // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+        fprintf(f_stat_main,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+            (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
+
         //    printf("gm_save_page: initial: %d, final: %d, modified: %d\n", initial_cnt, final_cnt, final_mod_cnt);
 
         return pages;
@@ -1176,11 +1178,13 @@ static int gm_save_page_end(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     // ram_addr_t current_addr;
     MemoryRegion *mr = block->mr;
     uint8_t *p;
-   long timestamp_start = 0;
-   long timestamp_duration = 0;
+    struct timespec ts_start;
+    struct timespec ts_end;
+    // long timestamp_start = 0;
+    // long timestamp_duration = 0;
                 
-                clock_gettime(CLOCK_REALTIME, &ts);
-                timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
+    clock_gettime(CLOCK_REALTIME, &ts_start);
+    // timestamp_start = ts.tv_sec*1000000 + ts.tv_nsec/1000;
     // int tmp;
 
 
@@ -1215,8 +1219,11 @@ static int gm_save_page_end(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
         *bytes_transferred += TARGET_PAGE_SIZE;
         pages = 1;
         acct_info.norm_pages++;
-                timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
-                fprintf(f_stat_main,"%ld,%ld;\n",timestamp_start,timestamp_duration);
+
+        clock_gettime(CLOCK_REALTIME, &ts_end);
+        // timestamp_duration = ts.tv_sec*1000000 + ts.tv_nsec/1000 - timestamp_start;
+        fprintf(f_stat_main,"%ld:%ld,%ld;\n",ts_start.tv_sec,ts_start.tv_nsec,
+            (ts_start.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start.tv_nsec):(ts_end.tv_nsec+1000000000L-ts_start.tv_nsec));
 
         //    printf("gm_save_page: initial: %d, final: %d, modified: %d\n", initial_cnt, final_cnt, final_mod_cnt);
 
@@ -1832,7 +1839,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 /* Called with iothread lock */
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
-    printf("ram save Complete start\n");
+    // printf("ram save Complete start\n");
     int total_pages = 0;
 
 
@@ -1848,6 +1855,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     head=0;
     tail=0;
     curr=0;
+
+    fprintf(f_stat_main,"ram save Complete start\n");
     // f_stat=f;
     pthread_create(&second_thread,NULL,second_thread_func,NULL);
 
@@ -1891,6 +1900,10 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     pthread_cond_signal(&cond_queue);
     pthread_mutex_unlock(&mutex_queue);
     pthread_join(second_thread,NULL);
+
+    fclose(f_stat_thread);
+    fclose(f_stat_main);
+
 
     ram_control_after_iterate(f, RAM_CONTROL_FINISH);
     migration_end();
