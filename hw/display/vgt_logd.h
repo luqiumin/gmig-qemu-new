@@ -34,7 +34,8 @@
 
 
 #define LOGD_SAMPLE_SIZE 4
-#define LOGD_SAMPLE_INTERVAL 16
+#define LOGD_SAMPLE_INTERVAL (TARGET_PAGE_SIZE >> 2)
+#define LOGD_SAMPLE_OFFSET (TARGET_PAGE_SIZE >> 3)
 
 #endif
 
@@ -67,5 +68,8 @@ typedef struct vgt_logd_t {
 bool vgt_page_is_modified(void *va, unsigned long gfn);
 void vgt_hash_a_page(void *va, unsigned long gfn);
 bool vgt_gpu_releated(unsigned long gfn);
+void init_output(void);
+void end_output(void);
+
 
 #endif

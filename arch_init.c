@@ -1358,6 +1358,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
     int total_pages = 0;
+    init_output();
     rcu_read_lock();
 
     //printf("enter ram_save_complete, bulk: %d\n", ram_bulk_stage);
@@ -1392,6 +1393,7 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     migration_end();
 
     rcu_read_unlock();
+    end_output();
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
 //    DPRINTF("ram_save_complete: pages: %d", total_pages);

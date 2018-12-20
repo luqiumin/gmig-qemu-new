@@ -1,6 +1,7 @@
 #include "vgt_logd.h"
 #include "qemu/bitmap.h"
 #include "qemu/bitops.h"
+#include <time.h>
 
 #define DEBUG_MIG_VGT
 #ifdef DEBUG_MIG_VGT
@@ -106,6 +107,27 @@ unsigned long* logd_alloc_dirty_bitmap(void) {
 
 extern bool hash_of_page_256bit(void* va, void* target);
 
+static FILE * fd;
+static int skip;
+static int sample;
+static int hash;
+static int clean;
+
+void init_output(void)
+{
+    fd = fopen("/home/img/main.dump","wb");
+    skip=0;
+    sample=0;
+    hash=0;
+    clean=0;
+    fprintf(fd,"SEC\tNSEC\tSAMPLETIME\tHASHTIME\tNEW\tSAMPLE\tHASH\tCLEAN\n");
+    return;
+}
+void end_output(void)
+{
+    fclose(fd);
+    return;
+}
 static inline
 void logd_hash_a_page(vgt_logd_t *logd, void *va, unsigned long gfn) {
     assert(logd!=NULL);
@@ -137,9 +159,14 @@ void logd_hash_a_page(vgt_logd_t *logd, void *va, unsigned long gfn) {
 
 #ifdef MIGRATION_SAMPLING
     int i=0;
+    // uint8_t * rec = tag->data_sample;
+    // uint8_t * src = ( (uint8_t *) va ) + LOGD_SAMPLE_OFFSET;
     for(i=0;i!=LOGD_SAMPLE_SIZE;++i)
     {
-        tag->data_sample[i]= * ( ( (uint8_t *) va ) + ( i*LOGD_SAMPLE_INTERVAL ) );
+        // (*rec) = (*src);
+        // ++rec;
+        // src += LOGD_SAMPLE_INTERVAL;
+        tag->data_sample[i]= * ( ( (uint8_t *) va ) + ( LOGD_SAMPLE_OFFSET + i*LOGD_SAMPLE_INTERVAL ) );
     }
 #endif
 
@@ -150,34 +177,89 @@ static inline
 bool logd_page_rehash_and_test(vgt_logd_t *logd, void *va, unsigned long gfn) {
     assert(logd!=NULL);
     assert(va!=NULL);
+    struct timespec ts_start;
+    struct timespec ts_start1;
 
-    if (SLOT_OFFSET(gfn) > logd->max_slot) return true;
+    struct timespec ts_end;
+    clock_gettime(CLOCK_REALTIME, &ts_start);
+    if (SLOT_OFFSET(gfn) > logd->max_slot) 
+    {
+        ++skip;
+        fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+        ,ts_start.tv_sec,ts_start.tv_nsec,0L,0L,skip,sample,hash,clean);
+        return true;
+    }
 
     logd_slot_t *slot = GET_SLOT(logd, gfn);
     assert(slot);
 
-    if (slot->logd_tag_block == NULL) return true;
-    if (slot->logd_dirty_bitmap == NULL) return true;
+    if (slot->logd_tag_block == NULL)
+    {
+        ++skip;
+        fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+        ,ts_start.tv_sec,ts_start.tv_nsec,0L,0L,skip,sample,hash,clean);
+        return true;
+    }
+    if (slot->logd_dirty_bitmap == NULL)
+    {
+        ++skip;
+        fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+        ,ts_start.tv_sec,ts_start.tv_nsec,0L,0L,skip,sample,hash,clean);
+        return true;
+    }
 
-    if (test_bit(TAG_OFFSET(gfn), slot->logd_dirty_bitmap)==0) return true;
+    if (test_bit(TAG_OFFSET(gfn), slot->logd_dirty_bitmap)==0) 
+    {
+        ++skip;
+        fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+        ,ts_start.tv_sec,ts_start.tv_nsec,0L,0L,skip,sample,hash,clean);
+        return true;
+    }
 
     logd_tag_t *tag = slot->logd_tag_block->block + TAG_OFFSET(gfn);
 
 
+    clock_gettime(CLOCK_REALTIME, &ts_start1);
 #ifdef MIGRATION_SAMPLING
     int i=0;
-     uint8_t test;
+    // uint8_t * rec = tag->data_sample;
+    uint8_t * test;// = ( (uint8_t *) va ) + LOGD_SAMPLE_OFFSET;
+    long temp1;
     for(i=0;i!=LOGD_SAMPLE_SIZE;++i)
     {
-        test = * ( ( (uint8_t *) va ) + ( i*LOGD_SAMPLE_INTERVAL ) ) ;
-        if( ( tag->data_sample[i] ) != test )
+        test =  ( ( (uint8_t *) va ) + ( LOGD_SAMPLE_OFFSET + i*LOGD_SAMPLE_INTERVAL ) ) ;
+        if( tag->data_sample[i] != (*test) )
         {
+            ++sample;
+            clock_gettime(CLOCK_REALTIME, &ts_end);
+            temp1 = (ts_start1.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start1.tv_nsec):(ts_end.tv_nsec-ts_start1.tv_nsec + (ts_end.tv_sec-ts_start1.tv_sec)*1000000000L);
+
+            fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+                ,ts_start.tv_sec,ts_start.tv_nsec,temp1,0L,skip,sample,hash,clean);
             return true;
         }
+        // ++rec;
+        // test += LOGD_SAMPLE_INTERVAL;
     }
+
+    clock_gettime(CLOCK_REALTIME, &ts_end);
+    temp1 = (ts_start1.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start1.tv_nsec):(ts_end.tv_nsec-ts_start1.tv_nsec + (ts_end.tv_sec-ts_start1.tv_sec)*1000000000L);
+
 #endif
 
+    long temp2;
+
     bool is_modified = hash_of_page_256bit(va, tag);
+
+    clock_gettime(CLOCK_REALTIME, &ts_end);
+    temp2 = (ts_start1.tv_sec==ts_end.tv_sec)?(ts_end.tv_nsec-ts_start1.tv_nsec):(ts_end.tv_nsec-ts_start1.tv_nsec + (ts_end.tv_sec-ts_start1.tv_sec)*1000000000L);
+    temp2 -= temp1;
+    if(is_modified)
+        ++hash;
+    else
+        ++clean;
+    fprintf(fd,"%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\t%d\n"
+        ,ts_start.tv_sec,ts_start.tv_nsec,temp1,temp2,skip,sample,hash,clean);
 
     return is_modified;
 }
