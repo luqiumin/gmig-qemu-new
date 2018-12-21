@@ -24,6 +24,8 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdlib.h>
+
+#include <time.h>
 #ifndef _WIN32
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -895,6 +897,8 @@ static int ram_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     return pages;
 }
 
+static FILE *f_stat_thread;
+static FILE *f_stat_main;
 static uint8_t pp[TARGET_PAGE_SIZE];
 
 static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
@@ -904,6 +908,11 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     ram_addr_t current_addr;
     MemoryRegion *mr = block->mr;
     uint8_t *p;
+    struct timespec ts_start;
+    struct timespec ts_hash_end;
+    struct timespec ts_transfer_end;
+
+    clock_gettime(CLOCK_REALTIME, &ts_start);
 
     p = memory_region_get_ram_ptr(mr) + offset;
     current_addr = block->offset + offset;
@@ -919,6 +928,8 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
          */
         vgt_hash_a_page(p, current_addr >> TARGET_PAGE_BITS);
         hash_gpu_pages_count++;
+        clock_gettime(CLOCK_REALTIME, &ts_hash_end);
+
     }
     else if (!ram_bulk_stage && !last_stage) {
         //printf("gm_save_page, not bulk or last!!!\n");
@@ -930,9 +941,20 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
          */
         hash_gpu_pages_count++;
         if (!vgt_page_is_modified(p, current_addr >> TARGET_PAGE_BITS)) {
+
+            clock_gettime(CLOCK_REALTIME, &ts_hash_end);
+
+        fprintf(f_stat_main,"%ld\t%ld\t%ld\t%ld\n",
+            ts_start.tv_sec,
+            ts_start.tv_nsec,
+            (ts_start.tv_sec==ts_hash_end.tv_sec)?(ts_hash_end.tv_nsec-ts_start.tv_nsec):(ts_hash_end.tv_nsec+1000000000L-ts_start.tv_nsec),
+            0L
+            );
             skip_by_hashing++;
             return 0;
         }
+
+        clock_gettime(CLOCK_REALTIME, &ts_hash_end);
     }
 
     if (block == last_sent_block) {
@@ -945,6 +967,16 @@ static int gm_save_page(QEMUFile *f, RAMBlock* block, ram_addr_t offset,
     *bytes_transferred += TARGET_PAGE_SIZE;
     pages = 1;
     acct_info.norm_pages++;
+
+        clock_gettime(CLOCK_REALTIME, &ts_transfer_end);
+
+
+        fprintf(f_stat_main,"%ld\t%ld\t%ld\t%ld\n",
+            ts_start.tv_sec,
+            ts_start.tv_nsec,
+            (ts_start.tv_sec==ts_hash_end.tv_sec)?(ts_hash_end.tv_nsec-ts_start.tv_nsec):(ts_hash_end.tv_nsec+1000000000L-ts_start.tv_nsec),
+            (ts_hash_end.tv_sec==ts_transfer_end.tv_sec)?(ts_transfer_end.tv_nsec-ts_hash_end.tv_nsec):(ts_transfer_end.tv_nsec+1000000000L-ts_hash_end.tv_nsec)
+            );
 
 //    printf("gm_save_page: initial: %d, final: %d, modified: %d\n", initial_cnt, final_cnt, final_mod_cnt);
 
@@ -1209,6 +1241,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     int64_t ram_bitmap_pages; /* Size of bitmap in pages, including gaps */
 
 //    DPRINTF("enter ram_save_setup\n");
+    f_stat_main = fopen("/home/img/main.dump","wb");
 
     mig_throttle_on = false;
     dirty_rate_high_cnt = 0;
@@ -1358,6 +1391,7 @@ static int ram_save_iterate(QEMUFile *f, void *opaque)
 static int ram_save_complete(QEMUFile *f, void *opaque)
 {
     int total_pages = 0;
+    fprintf(f_stat_main,"ram save Complete start\n");
     rcu_read_lock();
 
     //printf("enter ram_save_complete, bulk: %d\n", ram_bulk_stage);
@@ -1392,6 +1426,8 @@ static int ram_save_complete(QEMUFile *f, void *opaque)
     migration_end();
 
     rcu_read_unlock();
+
+    fclose(f_stat_main);
     qemu_put_be64(f, RAM_SAVE_FLAG_EOS);
 
 //    DPRINTF("ram_save_complete: pages: %d", total_pages);
